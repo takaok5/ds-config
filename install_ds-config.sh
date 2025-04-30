@@ -10,27 +10,48 @@ apt_try(){ havepkg "$1" && echo "✔ $1 già installato" && return 0; \
 # Assicurati di essere root
 [ "$EUID" -eq 0 ] || die "Esegui lo script come root (sudo)."
 
-# ------------------- Pulizia Completa -------------------
-echo "==> Pulizia completa di eventuali tracce locali"
-REPO_DIR="/opt/ds-config"
-TMP_DIR="/tmp/ds-config"
-CACHE_DIR="$HOME/.cache/git" # Cache Git locale, se esiste
+echo "==> apt update"
+apt-get update -y
 
-# Elimina la directory del repository
-rm -rf "$REPO_DIR" "$TMP_DIR" "$CACHE_DIR"
+# ------------------- installa dipendenze base --------------------------
+base_pkgs=(
+  vim-common python3 python3-pip python3-yaml python3-evdev
+  usbip bluez evtest curl unzip
+)
+for pkg in "${base_pkgs[@]}"; do
+  apt_try "$pkg" || echo "⚠️  Skip $pkg"
+done
 
-# Forza il DNS a risolvere direttamente GitHub
-echo "==> Pulizia cache DNS"
-systemd-resolve --flush-caches || true
-resolvectl flush-caches || true
+# linux-tools (non critico)
+if ! apt_try "linux-tools-$(uname -r)"; then
+  echo "ℹ️  linux-tools specifico non trovato; provo linux-tools-amd64"
+  apt_try linux-tools-amd64 || echo "ℹ️  tools generici non disponibili, continuo"
+fi
 
-# ------------------- Clonazione della repo -------------------
-echo "==> Clonazione della repository aggiornata"
-git clone https://github.com/takaok5/ds-config.git "$REPO_DIR" --branch main --depth 1 || die "git clone fallito"
+# ------------------- setup kernel modules -----------------------------
+if ! modprobe -n dummy_hcd &>/dev/null; then
+  echo "→ dummy_hcd mancante: installo kernel generico"
+  apt_try linux-image-amd64 || die "Non posso installare kernel generico"
+  echo "🔄 Riavvia e rilancia questo script su nuovo kernel"; exit 0
+else
+  echo "✔ dummy_hcd disponibile in $(uname -r)"
+fi
 
-# ------------------- Configurazione dei Gadget USB -------------------
-echo "==> Configurazione gadget USB"
-cat > "$REPO_DIR/bin/gadget_hid.sh" << 'EOF'
+# ------------------- scarica e installa gadget -------------------------
+echo "→ Scarico l'archivio zip della repo ds-config"
+REPO_URL="https://github.com/takaok5/ds-config/archive/refs/heads/main.zip"
+INSTALL_DIR="/opt/ds-config"
+
+# Rimuovi vecchie versioni
+rm -rf "$INSTALL_DIR" main.zip ds-config-main
+
+# Scarica e estrai
+curl -L "$REPO_URL" -o main.zip || die "Errore durante il download dello zip"
+unzip main.zip || die "Errore durante l'estrazione dello zip"
+mv ds-config-main "$INSTALL_DIR" || die "Errore durante lo spostamento dei file"
+
+# ------------------- riscrivo gadget_hid.sh corretto -------------------
+cat > /opt/ds-config/bin/gadget_hid.sh << 'EOF'
 #!/bin/bash
 set -euo pipefail
 
@@ -96,13 +117,17 @@ main() {
 main
 EOF
 
-chmod +x "$REPO_DIR/bin/"*.sh
+chmod +x /opt/ds-config/bin/*.sh
 
-# ------------------- Configura udev e Servizi --------------------------
-cp "$REPO_DIR/udev/rules.d/99-dualsense.rules" /etc/udev/rules.d/
+# ------------------- udev, moduli e servizi ----------------------------
+cp /opt/ds-config/udev/rules.d/99-dualsense.rules /etc/udev/rules.d/
 udevadm control --reload && udevadm trigger
+/opt/ds-config/bin/setup_modules.sh
 
-cp "$REPO_DIR/config/"*.service "$REPO_DIR/config/"*.timer /etc/systemd/system/
+getent group input >/dev/null || groupadd -r input
+usermod -aG input root
+
+cp /opt/ds-config/config/*.service /opt/ds-config/config/*.timer /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now usbipd.service gadget-hid.service ds-mapper.service usbip-check.timer
 
