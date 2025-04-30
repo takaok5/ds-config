@@ -1,0 +1,342 @@
+#!/usr/bin/env python3
+"""
+DualSense → Mouse/Keyboard mapper
+
+Aggiornato: 2025-04-27
+- Supporto multi-device (pad, touch-pad dedicato, sensori) tramite lista percorsi
+- Rapid-fire controllato dal grilletto R2 (BTN_RIGHT)
+- L2 = click sinistro continuo
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import threading
+import time
+import yaml
+import sys
+from pathlib import Path
+from select import select
+from typing import Dict, List
+
+from evdev import InputDevice, UInput, ecodes, list_devices
+
+# percorso predefinito dello YAML
+DEFAULT_CONFIG = "/opt/ds-config/config/dualSense_map.yaml"
+SONY_VENDOR    = 0x054C
+PRODUCTS_DS    = {0x0CE6, 0x0DF2}  # DualSense & DualSense Edge
+
+
+class DSMapper:
+    """Mappa un pad DualSense (e i suoi device associati) verso un HID virtuale."""
+
+    # ------------------------------------------------------------------ #
+    # init / config
+    # ------------------------------------------------------------------ #
+    def __init__(self, cfg_path: str, *, debug: bool = False, auto: bool = False) -> None:
+        cfg_path = Path(cfg_path).expanduser()
+        try:
+            with cfg_path.open("r", encoding="utf-8") as fp:
+                self.cfg = yaml.safe_load(fp) or {}
+        except FileNotFoundError:
+            logging.error("Config file non trovato: %s", cfg_path)
+            sys.exit(1)
+        except yaml.YAMLError as e:
+            logging.error("Errore parsing YAML %s: %s", cfg_path, e)
+            sys.exit(1)
+
+        self.debug = debug
+        self.running = True
+        self._lock = threading.Lock()
+
+        # Ora che self.cfg è completa posso parsarla in sicurezza
+        self._parse_cfg()
+
+        # -----------------------------------------------------------
+        # inizializza il flag rapid-fire DOPO che self.rf_enabled esiste
+        # -----------------------------------------------------------
+        self._rf_flag = threading.Event()
+        if self.rf_enabled:
+            self._rf_flag.set()        # Parsing configurazione preliminare (stick, mapping, ecc.)
+        # Autodetect PRIMA del parsing completo della cfg, così le
+        # sezioni che dipendono da "devices" risultano già popolate.
+         if auto or not self.cfg.get("devices") or self.cfg["devices"] in ("auto", None):
+             self.cfg["devices"] = self._auto_detect_devices()
+ 
+         # Ora che self.cfg è completa posso parsarla in sicurezza
+         self._parse_cfg()
+            logging.info("Rilevamento automatico DualSense: %s", self.cfg["devices"])
+
+        # ----- apri i dispositivi reali (controller, touch-pad, motion) -
+        self.dev_objs: List[InputDevice] = []
+        for name, path in self.cfg["devices"].items():
+            try:
+                dev = InputDevice(path)
+                dev.grab()              # blocca l’uso da altri processi
+                self.dev_objs.append(dev)
+                logging.info("Aperto %s: %s (fd=%d)", name, dev.name, dev.fd)
+            except Exception as exc:
+                logging.warning("Impossibile aprire %s (%s): %s", name, path, exc)
+
+        if not self.dev_objs:
+            raise RuntimeError("Nessun dispositivo DualSense trovato")
+
+        # ----- crea il dispositivo HID virtuale -------------------------
+        cap_keys = list(range(ecodes.KEY_MAX + 1)) + [ecodes.BTN_LEFT, ecodes.BTN_RIGHT]
+        capabilities = {
+            ecodes.EV_KEY: cap_keys,
+            ecodes.EV_REL: [ecodes.REL_X, ecodes.REL_Y],
+        }
+        self.uin = UInput(events=capabilities, name="DS-Mapper", version=0x0100)
+       try:
+           self.hid_fd = open("/dev/hidg0", "wb")
+    except Exception as e:
+           logging.error("Impossibile aprire /dev/hidg0: %s", e)
+           self.hid_fd = None
+        # ----- avvia il thread di rapid-fire ----------------------------
+        self._rf_thread = threading.Thread(target=self._rapid_fire_loop, daemon=True)
+        self._rf_thread.start()
+
+    # ------------------------------------------------------------------ #
+    # rilevamento automatico
+    # ------------------------------------------------------------------ #
+    def _auto_detect_devices(self) -> Dict[str, str]:
+         
+        """Rileva i vari sottodevice DualSense e restituisce un dict percorso-logico."""
+        paths: Dict[str, str] = {}
+        for dpath in list_devices():
+            try:
+                 dev = InputDevice(dpath)             # fd aperto solo per la scansione
+                    if dev.info.vendor != SONY_VENDOR or dev.info.product not in PRODUCTS_DS:
+                        dev.close(); continue
+
+                    caps = dev.capabilities()
+                    abs_axes = {code for code, _ in caps.get(ecodes.EV_ABS, [])}
+                    keys = set(caps.get(ecodes.EV_KEY, []))
+
+                    if ecodes.ABS_RX in abs_axes and ecodes.ABS_RZ in abs_axes:
+                        paths.setdefault("controller", dpath)
+                    elif ecodes.BTN_LEFT in keys:          # touch-pad USB
+                        paths.setdefault("touchpad", dpath)
+                    elif ecodes.ABS_GAS in abs_axes or ecodes.ABS_MISC in abs_axes:
+                        paths.setdefault("motion", dpath)
+            except Exception:
+                continue
+        return paths
+
+    # ------------------------------------------------------------------ #
+    # wrapper thread-safe per write / syn
+    # ------------------------------------------------------------------ #
+    def _w(self, ev_type: int, code: int, value: int) -> None:
+        """Invia un evento in modo thread-safe al dispositivo virtuale."""
+        with self._lock:
+            self.uin.write(ev_type, code, value)
+
+    def _syn(self) -> None:
+        """Flush degli eventi verso l’UInput thread-safe."""
+        with self._lock:
+            self.uin.syn()
+
+    # ------------------------------------------------------------------ #
+    # parsing configurazione
+    # ------------------------------------------------------------------ #
+    def _parse_cfg(self) -> None:
+        stick = self.cfg.get("stick", {})
+        self.center = stick.get(
+            "center",
+            {"left": {"x": 127, "y": 127}, "right": {"x": 127, "y": 127}},
+        )
+        self.deadzone = stick.get("deadzone", {"left": 10, "right": 10})
+        self.sens = stick.get("sensitivity", {"left": 1.0, "right": 1.0})
+        self.invert_y = stick.get("invert_y", {"left": False, "right": False})
+
+        # rapid-fire
+        mouse_cfg = self.cfg.get("mouse", {})
+        rf_cfg = mouse_cfg.get("rapid_fire", {})
+        self.rf_enabled = rf_cfg.get("enabled_by_default", False)
+        self.rf_rate = rf_cfg.get("rate_hz", 15)
+        self.rf_button = getattr(ecodes, rf_cfg.get("button", "BTN_RIGHT"), ecodes.BTN_RIGHT)
+
+        # soglie grilletti
+        trig = self.cfg.get("triggers", {})
+        self.l2_thresh = trig.get("l2_threshold", 100)
+        self.r2_thresh = trig.get("r2_threshold", 100)
+
+        # tabella codici → nome logico
+        default_codes: Dict[str, int] = {
+            "cross": 304, "circle": 305, "square": 308, "triangle": 307,
+            "l1": 310, "r1": 311, "l2": 312, "r2": 313,
+            "l3": 317, "r3": 318,
+            "share": 314, "options": 315, "ps": 316,
+            "touchpad": 320,
+            "dpad_up": 544, "dpad_down": 545, "dpad_left": 546, "dpad_right": 547,
+            "touchpad_click": ecodes.BTN_LEFT,  # click del touch-pad USB
+        }
+        self.codes: Dict[str, int] = {**default_codes, **self.cfg.get("codici_tasti_controller", {})}
+        self._code2name = {code: name for name, code in self.codes.items()}
+
+        # mapping logico
+        mapping_cfg = self.cfg.get("mapping", {})
+        self.map_buttons = mapping_cfg.get("buttons", {})
+        self.map_axes = mapping_cfg.get("axes", {})
+        self.mouse_sens = mouse_cfg.get("sensitivity", 3)
+
+    # ------------------------------------------------------------------ #
+    # ciclo principale
+    # ------------------------------------------------------------------ #
+    def start(self) -> None:
+        logging.info("DS-Mapper avviato – %d device evdev", len(self.dev_objs))
+        try:
+            while self.running:
+                r, _, _ = select(self.dev_objs, [], [], 0.01)
+                for dev in r:
+                    for ev in dev.read():
+                        self._handle_event(ev)
+         except KeyboardInterrupt:
+             pass 
+        finally:
+            self.cleanup()
+
+    # ------------------------------------------------------------------ #
+    # gestione eventi
+    # ------------------------------------------------------------------ #
+    def _handle_event(self, ev) -> None:
+        if ev.type == ecodes.EV_KEY:
+            self._handle_key(ev.code, ev.value)
+        elif ev.type == ecodes.EV_ABS:
+            self._handle_abs(ev.code, ev.value)
+
+    # ---------- tasti ---------- #
+    def _handle_key(self, code: int, value: int) -> None:
+        name = self._code2name.get(code)
+        if not name:
+            return
+
+        # Rapid-fire solo mentre tieni premuto R2
+        if name == "r2":
+            self.rf_enabled = (value == 1)
+
+        dest = self.map_buttons.get(name)
+        if not dest:
+            return
+
+        key_code = getattr(ecodes, dest, None)
+        if key_code is None:
+            return
+
+        self._w(ecodes.EV_KEY, key_code, value)
+        self._syn()
+
+    # ---------- assi ---------- #
+    def _handle_abs(self, code: int, value: int) -> None:
+        if code == ecodes.ABS_RX:                      # mirino X
+            dx = self._calc_rel("right", "x", value)
+            if dx:
+                self._w(ecodes.EV_REL, ecodes.REL_X, dx)
+        elif code == ecodes.ABS_RY:                    # mirino Y
+            dy = self._calc_rel("right", "y", value)
+            if dy:
+                self._w(ecodes.EV_REL, ecodes.REL_Y, dy)
+        elif code == ecodes.ABS_X:                     # movimento X
+            self._move_axis("left", "x", value)
+        elif code == ecodes.ABS_Y:                     # movimento Y
+            self._move_axis("left", "y", value)
+        elif code == ecodes.ABS_Z:                     # L2 → click sinistro
+            self._w(ecodes.EV_KEY, ecodes.BTN_LEFT, 1 if value > self.l2_thresh else 0)
+        elif code == ecodes.ABS_RZ:                    # R2 → rapid-fire + click destro
+            pressed = value > self.r2_thresh
+            self.rf_enabled = pressed
+            self._w(ecodes.EV_KEY, ecodes.BTN_RIGHT, 1 if pressed else 0)
+
+        # flush finale per tutti i casi precedenti
+        self._syn()
+
+    # ------------------------------------------------------------------ #
+    # helper assi
+    # ------------------------------------------------------------------ #
+    def _calc_rel(self, side: str, axis: str, v: int) -> int:
+        c = self.center[side][axis]
+        dv = v - c
+        if abs(dv) <= self.deadzone[side]:
+            return 0
+        factor = self.mouse_sens * self.sens[side]
+        if axis == "y" and self.invert_y[side]:
+            dv = -dv
+        return int(dv * factor / 128)
+
+    def _move_axis(self, side: str, axis: str, v: int) -> None:
+        m = self.map_axes.get(f"{side[0]}s_{axis}")
+        if not m:
+            return
+        c = self.center[side][axis]
+        dv = v - c
+        dz = self.deadzone[side]
+        key_neg = getattr(ecodes, m["negative"])
+        key_pos = getattr(ecodes, m["positive"])
+        if dv < -dz:
+            self._w(ecodes.EV_KEY, key_neg, 1)
+            self._w(ecodes.EV_KEY, key_pos, 0)
+        elif dv > dz:
+            self._w(ecodes.EV_KEY, key_pos, 1)
+            self._w(ecodes.EV_KEY, key_neg, 0)
+        else:
+            self._w(ecodes.EV_KEY, key_neg, 0)
+            self._w(ecodes.EV_KEY, key_pos, 0)
+
+        self._syn()
+
+    # ------------------------------------------------------------------ #
+    # rapid-fire thread
+    # ------------------------------------------------------------------ #
+    def _rapid_fire_loop(self) -> None:
+        period = 1.0 / max(self.rf_rate, 1)
+        idle = 0.05
+        while self.running:
+            if self.rf_enabled:
+                self._w(ecodes.EV_KEY, self.rf_button, 1)
+                self._syn()
+                self._w(ecodes.EV_KEY, self.rf_button, 0)
+                self._syn()
+                time.sleep(period)
+            else:
+                time.sleep(idle)
+
+    # ------------------------------------------------------------------ #
+    # clean-up
+    # ------------------------------------------------------------------ #
+    def cleanup(self) -> None:
+        self.running = False
+        try:
+            self.uin.close()
+            # attendo che il thread di rapid-fire termini
+            if self._rf_thread.is_alive():
+                self._rf_thread.join(timeout=0.5)
+        finally:
+            for dev in self.dev_objs:
+                try:
+                    dev.ungrab()
+                except Exception:
+                    pass
+                dev.close()
+
+
+# ---------------------------------------------------------------------- #
+def main() -> None:
+    ap = argparse.ArgumentParser(description="DualSense → HID mapper")
+    ap.add_argument("-c", "--config", default=DEFAULT_CONFIG, help="percorso YAML di configurazione")
+    ap.add_argument("-d", "--debug", action="store_true", help="modalità debug verbosa")
+    ap.add_argument("-a", "--auto", action="store_true", help="forza l’autodetect dei device")
+    args = ap.parse_args()
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.debug else logging.INFO,
+        format="%(asctime)s %(levelname)s: %(message)s",
+    )
+
+    mapper = DSMapper(args.config, debug=args.debug, auto=args.auto)
+    mapper.start()
+
+
+if __name__ == "__main__":
+    main()
