@@ -1,0 +1,13 @@
+[Unit]
+Description=Verify USB/IP binding and re-bind if needed
+After=network.target gadget-hid.service
+Wants=gadget-hid.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c '\
+  BUSID=$(cat /tmp/ds_gadget_busid 2>/dev/null || true); \
+  if [ -n "$BUSID" ] && usbip port | grep -qE "Port .*:.*Vacant"; then \
+      echo "Re-binding USB/IP on $BUSID"; \
+      usbip bind -b "$BUSID"; \
+  fi'

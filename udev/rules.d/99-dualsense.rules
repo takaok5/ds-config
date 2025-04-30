@@ -1,0 +1,6 @@
+ # USB: 054c:0ce6  DualSense (USB)
+SUBSYSTEM=="input", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="0ce6", \
+        SYMLINK+="input/dualsense-%k", GROUP="input"
+  # BT:  054c:0df2  DualSense (Bluetooth) 
+SUBSYSTEM=="input", ATTRS{idVendor}=="054c", ATTRS{idProduct}=="0df2", \
+        SYMLINK+="input/dualsense-%k", GROUP="input"

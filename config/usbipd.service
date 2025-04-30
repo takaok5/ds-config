@@ -1,0 +1,14 @@
+[Unit]
+Description=USB/IP daemon
+After=network.target
+Requires=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/usbipd -D
+ExecStartPre=/bin/bash -c 'echo 1 > /sys/module/usbip_core/parameters/usbip_debug'
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

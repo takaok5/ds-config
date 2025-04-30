@@ -1,0 +1,14 @@
+[Unit]
+Description=USB HID Gadget Setup
+After=network.target
+ConditionPathExists=/sys/kernel/config
+
+[Service]
+Type=oneshot
+ExecStart=/opt/ds-config/bin/gadget_hid.sh
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

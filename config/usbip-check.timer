@@ -1,0 +1,10 @@
+[Unit]
+Description=Periodically Check USB/IP Status
+After=network.target
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=30s
+
+[Install]
+WantedBy=timers.target

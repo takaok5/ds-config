@@ -1,0 +1,60 @@
+# dualSense_map.yaml — versione compatibile con DSMapper
+
+devices:
+  controller: /dev/input/event16    # game-pad
+  touchpad:   /dev/input/event18    # touch-pad USB separato
+  motion:     /dev/input/event17    # sensori movimento
+
+stick:
+  center:
+    x: 127
+    y: 127
+  deadzone: 10                      # stick.get("deadzone", 10) :contentReference[oaicite:0]{index=0}
+  sens: 1.0                         # stick.get("sens", 1.0) :contentReference[oaicite:1]{index=1}
+  invert_y: false                   # stick.get("invert_y", False) :contentReference[oaicite:2]{index=2}
+
+mouse:
+  sens_x: 3                         # da mouse.sensitivity originale :contentReference[oaicite:3]{index=3}
+  sens_y: 3
+  rapid_fire:
+    enabled_by_default: false       # rapid_fire.get("enabled_by_default", False) :contentReference[oaicite:4]{index=4}
+    rate_hz: 15                     # rapid_fire.get("rate_hz", 15) :contentReference[oaicite:5]{index=5}
+    button: BTN_RIGHT               # rapid_fire.get("button", "BTN_RIGHT") :contentReference[oaicite:6]{index=6}
+
+triggers:
+  l2_threshold: 100                 # usato in test_ds.sh; invariato :contentReference[oaicite:7]{index=7}
+  r2_threshold: 100
+
+keyboard:
+  modifiers: {}                     # non usato da DSMapper, mantenuto per completezza :contentReference[oaicite:8]{index=8}
+
+codici_tasti_controller:
+  touchpad_click: 272               # BTN_LEFT del touch-pad USB :contentReference[oaicite:9]{index=9}
+
+mapping:
+  axes:
+    ls_x:
+      negative: KEY_A
+      positive: KEY_D
+    ls_y:
+      negative: KEY_W
+      positive: KEY_S
+
+key_mapping:                       # sostituisce mapping.buttons per DSMapper :contentReference[oaicite:10]{index=10}
+  BTN_SOUTH:     KEY_SPACE         # cross → salto
+  BTN_EAST:      KEY_V             # circle → melee
+  BTN_WEST:      KEY_R             # square → ricarica
+  BTN_NORTH:     KEY_1             # triangle → arma primaria
+  BTN_TL:        KEY_Q             # l1 → abilità tattica
+  BTN_TR:        KEY_G             # r1 → granata
+  BTN_TL2:       BTN_LEFT          # l2 → click sinistro continuo
+  BTN_TR2:       BTN_RIGHT         # r2 → click destro + rapid-fire
+  BTN_THUMBL:    KEY_B             # l3 → corsa
+  BTN_THUMBR:    KEY_C             # r3 → abbassati
+  BTN_SELECT:    KEY_TAB           # share → statistiche
+  BTN_START:     KEY_ESC           # options → menu
+  BTN_MODE:      KEY_M             # touchpad (click sul pad fisico)
+  BTN_DPAD_UP:   KEY_3             # dpad_up
+  BTN_DPAD_DOWN: KEY_4             # dpad_down
+  BTN_DPAD_LEFT: KEY_Z             # dpad_left
+  BTN_DPAD_RIGHT:KEY_X             # dpad_right

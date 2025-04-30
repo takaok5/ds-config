@@ -1,0 +1,14 @@
+[Unit]
+Description=USB/IP export for %i
+Requires=network.target
+After=network.target gadget-hid.service
+ConditionPathExists=!/run/usbipd.pid
+
+[Service]
+Type=forking
+ExecStart=/bin/bash -c 'BUSID=$(cat /tmp/ds_gadget_busid 2>/dev/null || echo %i); echo "Binding USBIP for $BUSID"; usbip bind -b "$BUSID"'
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

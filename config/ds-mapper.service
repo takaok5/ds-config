@@ -1,0 +1,19 @@
+[Unit]
+Description=DualSense to HID Mapper Service
+After=bluetooth.target gadget-hid.service
+Requires=gadget-hid.service
+Wants=bluetooth.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/env python3 /opt/ds-config/bin/ds_mapper.py
+Restart=on-failure
+RestartSec=5
+User=root
+Group=input
+Environment=PYTHONUNBUFFERED=1
+ExecStop=/bin/kill -TERM $MAINPID
+StandardOutput=journal
+StandardError=inherit
+[Install]
+WantedBy=multi-user.target
