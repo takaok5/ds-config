@@ -1,10 +1,12 @@
 [Unit]
 Description=USB HID Gadget Setup
-After=network.target
-ConditionPathExists=/sys/kernel/config
+After=network.target sys-kernel-config.mount
+Wants=sys-kernel-config.mount
 
 [Service]
 Type=oneshot
+ExecStartPre=/usr/bin/mkdir -p /sys/kernel/config
+ExecStartPre=/usr/bin/mount -t configfs none /sys/kernel/config
 ExecStart=/opt/ds-config/bin/gadget_hid.sh
 RemainAfterExit=yes
 Restart=on-failure
