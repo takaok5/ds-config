@@ -5,8 +5,8 @@ Requires=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/sbin/usbipd -D
 ExecStartPre=/bin/bash -c 'echo 1 > /sys/module/usbip_core/parameters/usbip_debug'
+ExecStart=/usr/sbin/usbipd
 Restart=on-failure
 RestartSec=5
 
