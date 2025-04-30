@@ -109,9 +109,10 @@ main() {
     }
     
     # Mount configfs if needed
-    if ! grep -q configfs /proc/mounts; then
-        mount -t configfs none /sys/kernel/config
-    fi
+ if ! mountpoint -q /sys/kernel/config; then
+  mount -t configfs none /sys/kernel/config \
+    || { echo "Error: configfs mount failed" >&2; exit 1; }
+fi
     
     cleanup
     setup
